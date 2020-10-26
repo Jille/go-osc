@@ -62,6 +62,7 @@ type Client struct {
 // incoming OSC packets and bundles.
 type Server struct {
 	Addr        string
+	conn        net.PacketConn
 	Dispatcher  *OscDispatcher
 	ReadTimeout time.Duration
 }
@@ -81,23 +82,23 @@ type Timetag struct {
 // Dispatcher is an interface for an OSC message dispatcher. A dispatcher is
 // responsible for dispatching received OSC messages.
 type Dispatcher interface {
-	Dispatch(packet Packet)
+	Dispatch(packet Packet, src net.Addr)
 }
 
 // Handler is an interface for message handlers. Every handler implementation
 // for an OSC message must implement this interface.
 type Handler interface {
-	HandleMessage(msg *Message)
+	HandleMessage(msg *Message, src net.Addr)
 }
 
 // HandlerFunc implements the Handler interface. Type definition for an OSC
 // handler function.
-type HandlerFunc func(msg *Message)
+type HandlerFunc func(msg *Message, src net.Addr)
 
 // HandleMessage calls itself with the given OSC Message. Implements the
 // Handler interface.
-func (f HandlerFunc) HandleMessage(msg *Message) {
-	f(msg)
+func (f HandlerFunc) HandleMessage(msg *Message, src net.Addr) {
+	f(msg, src)
 }
 
 ////
@@ -132,7 +133,7 @@ func (s *OscDispatcher) AddMsgHandler(addr string, handler HandlerFunc) error {
 }
 
 // Dispatch dispatches OSC packets. Implements the Dispatcher interface.
-func (s *OscDispatcher) Dispatch(packet Packet) {
+func (s *OscDispatcher) Dispatch(packet Packet, src net.Addr) {
 	switch packet.(type) {
 	default:
 		return
@@ -141,11 +142,11 @@ func (s *OscDispatcher) Dispatch(packet Packet) {
 		msg, _ := packet.(*Message)
 		for addr, handler := range s.handlers {
 			if msg.Match(addr) {
-				handler.HandleMessage(msg)
+				handler.HandleMessage(msg, src)
 			}
 		}
 		if s.defaultHandler != nil {
-			s.defaultHandler.HandleMessage(msg)
+			s.defaultHandler.HandleMessage(msg, src)
 		}
 
 	case *Bundle:
@@ -157,17 +158,17 @@ func (s *OscDispatcher) Dispatch(packet Packet) {
 			for _, message := range bundle.Messages {
 				for address, handler := range s.handlers {
 					if message.Match(address) {
-						handler.HandleMessage(message)
+						handler.HandleMessage(message, src)
 					}
 				}
 				if s.defaultHandler != nil {
-					s.defaultHandler.HandleMessage(message)
+					s.defaultHandler.HandleMessage(message, src)
 				}
 			}
 
 			// Process all bundles
 			for _, b := range bundle.Bundles {
-				s.Dispatch(b)
+				s.Dispatch(b, src)
 			}
 		}()
 	}
@@ -566,8 +567,9 @@ func (s *Server) ListenAndServe() error {
 // retrieved OSC packets. If something goes wrong an error is returned.
 func (s *Server) Serve(c net.PacketConn) error {
 	var tempDelay time.Duration
+	s.conn = c
 	for {
-		msg, err := s.readFromConnection(c)
+		msg, addr, err := s.readFromConnection(c)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
 				if tempDelay == 0 {
@@ -584,37 +586,50 @@ func (s *Server) Serve(c net.PacketConn) error {
 			return err
 		}
 		tempDelay = 0
-		go s.Dispatcher.Dispatch(msg)
+		go s.Dispatcher.Dispatch(msg, addr)
 	}
 
 	return nil
 }
 
 // ReceivePacket listens for incoming OSC packets and returns the packet if one is received.
-func (s *Server) ReceivePacket(c net.PacketConn) (Packet, error) {
+func (s *Server) ReceivePacket(c net.PacketConn) (Packet, net.Addr, error) {
 	return s.readFromConnection(c)
 }
 
+// Reply sends an OSC packet to an address.
+func (s *Server) Reply(p Packet, dst net.Addr) error {
+	data, err := p.MarshalBinary()
+	if err != nil {
+		return err
+	}
+
+	if _, err = s.conn.WriteTo(data, dst); err != nil {
+		return err
+	}
+	return nil
+}
+
 // readFromConnection retrieves OSC packets.
-func (s *Server) readFromConnection(c net.PacketConn) (Packet, error) {
+func (s *Server) readFromConnection(c net.PacketConn) (Packet, net.Addr, error) {
 	if s.ReadTimeout != 0 {
 		if err := c.SetReadDeadline(time.Now().Add(s.ReadTimeout)); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	data := make([]byte, 65535)
-	n, _, err := c.ReadFrom(data)
+	n, addr, err := c.ReadFrom(data)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var start int
 	p, err := readPacket(bufio.NewReader(bytes.NewBuffer(data)), &start, n)
 	if err != nil {
-		return nil, err
+		return nil, addr, err
 	}
-	return p, nil
+	return p, addr, nil
 }
 
 func ParsePacket(msg string) (Packet, error) {
