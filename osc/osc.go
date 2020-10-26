@@ -24,6 +24,7 @@ const (
 // Packet is the interface for Message and Bundle.
 type Packet interface {
 	encoding.BinaryMarshaler
+	fmt.Stringer
 }
 
 // Message represents a single OSC message. An OSC message consists of an OSC
@@ -396,6 +397,21 @@ func (b *Bundle) Append(pck Packet) error {
 	}
 
 	return nil
+}
+
+func (b *Bundle) String() string {
+	var buf bytes.Buffer
+	buf.WriteString("{ ")
+	for _, sb := range b.Bundles {
+		buf.WriteString(sb.String())
+		buf.WriteString("; ")
+	}
+	for _, sm := range b.Messages {
+		buf.WriteString(sm.String())
+		buf.WriteString("; ")
+	}
+	buf.WriteString("}")
+	return buf.String()
 }
 
 // MarshalBinary serializes the OSC bundle to a byte array with the following
